@@ -25,6 +25,7 @@ import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
 
 class UsbService : Service() {
 
@@ -238,7 +239,7 @@ class UsbService : Service() {
         private var seqNum: Int = 0
         
         // URB handlers for imported devices
-        private val urbHandlers = mutableMapOf<Int, UrbHandler>()
+        private val urbHandlers = ConcurrentHashMap<Int, UrbHandler>()
 
         suspend fun run() {
             running = true
@@ -540,17 +541,33 @@ class UsbService : Service() {
         
         private fun handleUrbSubmit(devId: Int, input: java.io.InputStream, payloadLength: Int) {
             try {
-                // Read URB submit payload
-                val urbPayload = ByteArray(payloadLength)
+                // Read URB submit header (28 bytes)
+                val urbHeaderSize = 28
+                val urbHeader = ByteArray(urbHeaderSize)
                 var bytesRead = 0
-                while (bytesRead < payloadLength) {
-                    val n = input.read(urbPayload, bytesRead, payloadLength - bytesRead)
+                while (bytesRead < urbHeaderSize) {
+                    val n = input.read(urbHeader, bytesRead, urbHeaderSize - bytesRead)
                     if (n < 0) break
                     bytesRead += n
                 }
                 
                 // Parse URB submit
-                val urbSubmit = UrbSubmit.parse(urbPayload)
+                val urbSubmit = UrbSubmit.parse(urbHeader)
+                
+                // Read data payload for OUT transfers
+                val dataPayload = if (urbSubmit.dataLen > 0 && urbSubmit.direction == URB_DIR_OUT) {
+                    val data = ByteArray(urbSubmit.dataLen)
+                    var dataRead = 0
+                    while (dataRead < urbSubmit.dataLen) {
+                        val n = input.read(data, dataRead, urbSubmit.dataLen - dataRead)
+                        if (n < 0) break
+                        dataRead += n
+                    }
+                    Log.d(TAG, "Read OUT data: $dataRead/${urbSubmit.dataLen} bytes")
+                    data
+                } else {
+                    byteArrayOf()
+                }
                 
                 // Find URB handler
                 val urbHandler = urbHandlers[devId]
@@ -561,8 +578,8 @@ class UsbService : Service() {
                     return
                 }
                 
-                // Execute URB
-                val urbComplete = urbHandler.handleUrbSubmit(urbSubmit)
+                // Execute URB with data payload
+                val urbComplete = urbHandler.handleUrbSubmit(urbSubmit, dataPayload)
                 
                 // Send response
                 sendProtocolMessage(CMD_URB_COMPLETE, devId.toShort().toInt() and 0xFFFF, urbComplete.toByteArray())

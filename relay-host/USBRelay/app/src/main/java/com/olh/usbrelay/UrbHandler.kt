@@ -91,14 +91,14 @@ class UrbHandler(
     /**
      * Handle URB submit request
      */
-    fun handleUrbSubmit(urbSubmit: UrbSubmit): UrbComplete {
+    fun handleUrbSubmit(urbSubmit: UrbSubmit, dataPayload: ByteArray = byteArrayOf()): UrbComplete {
         return try {
-            Log.d(TAG, "Processing URB: type=${urbSubmit.transferType}, ep=${urbSubmit.endpoint}, dir=${urbSubmit.direction}")
+            Log.d(TAG, "Processing URB: type=${urbSubmit.transferType}, ep=${urbSubmit.endpoint}, dir=${urbSubmit.direction}, dataLen=${dataPayload.size}")
             
             val result = when (urbSubmit.transferType) {
                 URB_TRANSFER_CTRL -> executeControlTransfer(urbSubmit)
-                URB_TRANSFER_BULK -> executeBulkTransfer(urbSubmit)
-                URB_TRANSFER_INT -> executeInterruptTransfer(urbSubmit)
+                URB_TRANSFER_BULK -> executeBulkTransfer(urbSubmit, dataPayload)
+                URB_TRANSFER_INT -> executeInterruptTransfer(urbSubmit, dataPayload)
                 URB_TRANSFER_ISO -> executeIsochronousTransfer(urbSubmit)
                 else -> {
                     Log.e(TAG, "Unknown transfer type: ${urbSubmit.transferType}")
@@ -152,7 +152,7 @@ class UrbHandler(
     /**
      * Execute bulk transfer
      */
-    private fun executeBulkTransfer(urbSubmit: UrbSubmit): UrbComplete {
+    private fun executeBulkTransfer(urbSubmit: UrbSubmit, dataPayload: ByteArray): UrbComplete {
         val conn = connection ?: return UrbComplete(urbSubmit.seqNum, URB_STATUS_NO_DEVICE, byteArrayOf())
         
         try {
@@ -175,7 +175,7 @@ class UrbHandler(
                 }
             } else {
                 // OUT transfer - write to device
-                val data = ByteArray(urbSubmit.dataLen)  // In real impl, get data from payload
+                val data = if (dataPayload.isNotEmpty()) dataPayload else ByteArray(urbSubmit.dataLen)
                 val result = conn.bulkTransfer(endpoint, data, data.size, USB_TIMEOUT)
                 
                 if (result >= 0) {
@@ -195,7 +195,7 @@ class UrbHandler(
     /**
      * Execute interrupt transfer
      */
-    private fun executeInterruptTransfer(urbSubmit: UrbSubmit): UrbComplete {
+    private fun executeInterruptTransfer(urbSubmit: UrbSubmit, dataPayload: ByteArray): UrbComplete {
         val conn = connection ?: return UrbComplete(urbSubmit.seqNum, URB_STATUS_NO_DEVICE, byteArrayOf())
         
         try {
@@ -215,7 +215,7 @@ class UrbHandler(
                     return UrbComplete(urbSubmit.seqNum, URB_STATUS_ERROR, byteArrayOf())
                 }
             } else {
-                val data = ByteArray(urbSubmit.dataLen)
+                val data = if (dataPayload.isNotEmpty()) dataPayload else ByteArray(urbSubmit.dataLen)
                 val result = conn.bulkTransfer(endpoint, data, data.size, USB_TIMEOUT)
                 
                 if (result >= 0) {
@@ -235,7 +235,8 @@ class UrbHandler(
      * Execute isochronous transfer (not fully supported on Android)
      */
     private fun executeIsochronousTransfer(urbSubmit: UrbSubmit): UrbComplete {
-        Log.w(TAG, "Isochronous transfer not fully supported")
+        // TODO: Android USB Host API不支持ISO传输，可能需要通过JNI调用libusb
+        Log.w(TAG, "Isochronous transfer not supported on Android - requires libusb JNI")
         return UrbComplete(urbSubmit.seqNum, URB_STATUS_ERROR, byteArrayOf())
     }
     
