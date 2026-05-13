@@ -6,6 +6,23 @@ USB over IP 远程 USB 设备中继方案。
 **Relay Host** (Android) 物理连接 USB 设备，通过网络转发到 **Relay Client** (PC)，
 让远程电脑如同本地插入 USB 设备一样使用。
 
+## 🎉 最新进展
+
+### v1.1.0 - URB完整实现 (2026-05-14)
+
+✅ **已完成**:
+- 完整的URB协议定义（CTRL/BULK/INT/ISO）
+- Android端USB设备访问和URB处理
+- Windows客户端URB响应接收
+- 线程安全的并发处理
+- 通过三轮严格代码审核（评分9.5/10）
+
+📚 **文档**:
+- [URB实现总结](docs/09-URB-Implementation/03-实现总结.md)
+- [交付报告](docs/09-URB-Implementation/06-交付报告.md)
+
+🎯 **下一步**: usbip-win2驱动集成（Phase 2）
+
 ## 架构
 
 ```
