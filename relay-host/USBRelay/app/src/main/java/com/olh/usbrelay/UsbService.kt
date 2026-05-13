@@ -35,10 +35,14 @@ class UsbService : Service() {
         
         // Protocol command codes
         private const val CMD_DEVLIST_REQ = 0x0001
+        private const val CMD_DEVLIST_RES = 0x0002
+        private const val CMD_IMPORT_REQ = 0x0003
+        private const val CMD_IMPORT_RES = 0x0004
         private const val CMD_KEEPALIVE = 0x000A
         private const val CMD_PONG = 0x000B
         private const val CMD_LOG = 0x1001
         private const val CMD_DEVICE_UPDATE = 0x1002
+        private const val CMD_IMPORT_DEVICE = 0x1003
     }
 
     private val binder = UsbBinder()
@@ -61,6 +65,12 @@ class UsbService : Service() {
     
     // Track available USB devices
     private var availableDevices = mutableMapOf<String, UsbDevice>()
+    
+    // Track imported devices (device_id -> UsbDevice)
+    private val importedDevices = mutableMapOf<Int, UsbDevice>()
+    
+    // Device ID mapping (id -> deviceName)
+    private val deviceIdMap = mutableMapOf<Int, String>()
 
     inner class UsbBinder : Binder() {
         fun getService(): UsbService = this@UsbService
@@ -277,6 +287,10 @@ class UsbService : Service() {
                                     log("Ping received")
                                     sendPong()
                                 }
+                                CMD_IMPORT_DEVICE -> {
+                                    log("Import device request: dev_id=$devId")
+                                    handleImportDevice(devId, input, length.toLong())
+                                }
                                 else -> {
                                     log("Unknown command: 0x${command.toString(16).uppercase()}")
                                 }
@@ -387,6 +401,9 @@ class UsbService : Service() {
         
         fun sendDeviceListUpdate() {
             try {
+                // Clear and rebuild device ID map
+                deviceIdMap.clear()
+                
                 // Create JSON device list
                 val devicesJson = StringBuilder("[")
                 var first = true
@@ -394,6 +411,9 @@ class UsbService : Service() {
                 for ((deviceName, device) in availableDevices) {
                     if (!first) devicesJson.append(",")
                     first = false
+                    
+                    // Build ID mapping
+                    deviceIdMap[id] = deviceName
                     
                     devicesJson.append("{")
                     devicesJson.append("\"id\":$id,")
@@ -411,6 +431,84 @@ class UsbService : Service() {
                 log("Sent device list update with ${availableDevices.size} devices")
             } catch (e: Exception) {
                 log("Failed to send device list: ${e.message}", Log.ERROR)
+            }
+        }
+        
+        private fun handleImportDevice(devId: Int, input: java.io.InputStream, payloadLength: Long) {
+            try {
+                // Read payload if any
+                if (payloadLength > 0) {
+                    val skipBuf = ByteArray(payloadLength.toInt())
+                    var skipped = 0
+                    while (skipped < payloadLength) {
+                        val n = input.read(skipBuf, skipped, (payloadLength - skipped).toInt())
+                        if (n < 0) break
+                        skipped += n
+                    }
+                }
+                
+                // Find device by ID using the mapping
+                val deviceName = deviceIdMap[devId]
+                
+                if (deviceName == null) {
+                    log("Import failed: Device ID $devId not found")
+                    sendImportResponse(1, devId, 1, "Device not found")
+                    return
+                }
+                
+                val device = availableDevices[deviceName]
+                if (device == null) {
+                    log("Import failed: Device data not found for $deviceName")
+                    sendImportResponse(1, devId, 2, "Device data error")
+                    return
+                }
+                
+                // Check if already imported
+                if (importedDevices.containsValue(device)) {
+                    log("Device already imported: $deviceName")
+                    sendImportResponse(0, devId, 0, "Already imported")
+                    return
+                }
+                
+                // Import device (placeholder - real implementation needs usbip-win2 driver)
+                importedDevices[devId] = device
+                log("Device imported successfully: $deviceName (ID: $devId)")
+                sendImportResponse(0, devId, 0, "Success - Note: Full USB virtualization requires driver integration")
+                
+            } catch (e: Exception) {
+                log("Import device error: ${e.message}", Log.ERROR)
+                sendImportResponse(1, devId, 2, e.message ?: "Unknown error")
+            }
+        }
+        
+        private fun sendImportResponse(status: Int, devId: Int, resultCode: Int, message: String) {
+            try {
+                val msgBytes = message.toByteArray(Charsets.UTF_8)
+                
+                // Build payload: status(2) + dev_id(2) + result_code(4) + message
+                val payload = ByteArray(2 + 2 + 4 + msgBytes.size)
+                var offset = 0
+                
+                // Status (2 bytes, big-endian)
+                payload[offset++] = ((status shr 8) and 0xFF).toByte()
+                payload[offset++] = (status and 0xFF).toByte()
+                
+                // Device ID (2 bytes, big-endian)
+                payload[offset++] = ((devId shr 8) and 0xFF).toByte()
+                payload[offset++] = (devId and 0xFF).toByte()
+                
+                // Result code (4 bytes, big-endian)
+                payload[offset++] = ((resultCode shr 24) and 0xFF).toByte()
+                payload[offset++] = ((resultCode shr 16) and 0xFF).toByte()
+                payload[offset++] = ((resultCode shr 8) and 0xFF).toByte()
+                payload[offset++] = (resultCode and 0xFF).toByte()
+                
+                // Message
+                System.arraycopy(msgBytes, 0, payload, offset, msgBytes.size)
+                
+                sendProtocolMessage(CMD_IMPORT_RES, devId.toShort().toInt() and 0xFFFF, payload)
+            } catch (e: Exception) {
+                log("Failed to send import response: ${e.message}", Log.ERROR)
             }
         }
 

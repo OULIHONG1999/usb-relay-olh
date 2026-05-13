@@ -15,12 +15,15 @@ import json
 from datetime import datetime
 
 # 协议常量
-CMD_PING = 0x0001
-CMD_PONG = 0x0002
-CMD_DEVLIST_REQ = 0x0010
-CMD_DEVLIST_RES = 0x0011
-CMD_LOG = 0x0020
-CMD_DEV_UPDATE = 0x0030
+CMD_DEVLIST_REQ = 0x0001
+CMD_DEVLIST_RES = 0x0002
+CMD_IMPORT_REQ = 0x0003
+CMD_IMPORT_RES = 0x0004
+CMD_KEEPALIVE = 0x000A
+CMD_PONG = 0x000B
+CMD_LOG = 0x1001
+CMD_DEVICE_UPDATE = 0x1002
+CMD_IMPORT_DEVICE = 0x1003
 
 DEFAULT_HOST = "192.168.31.97"
 DEFAULT_PORT = 3240
@@ -207,7 +210,7 @@ class USBRelayClient:
             
         try:
             # 构建header: cmd(2) + seq(4) + dev_id(2) + length(4) + reserved(4)
-            header = struct.pack('!HIHHI', cmd, seq, dev_id, len(payload), 0)
+            header = struct.pack('!HIHII', cmd, seq, dev_id, len(payload), 0)
             self.sock.sendall(header)
             
             if payload:
@@ -222,7 +225,7 @@ class USBRelayClient:
     def ping(self):
         """Ping服务器"""
         self.log("发送 Ping...")
-        self.send_cmd(0x000A, seq=1)  # CMD_KEEPALIVE
+        self.send_cmd(CMD_KEEPALIVE, seq=1)
         
     def refresh_devices(self):
         """刷新设备列表"""
@@ -231,7 +234,7 @@ class USBRelayClient:
             self.log("请先连接！", "WARN")
             return
             
-        self.send_cmd(0x0001)  # CMD_DEVLIST_REQ
+        self.send_cmd(CMD_DEVLIST_REQ)
         
     def import_device(self):
         """导入选中设备"""
@@ -243,12 +246,16 @@ class USBRelayClient:
         item = self.tree.item(selected[0])
         dev_id = item['values'][0]
         
-        self.log(f"导入设备 ID: {dev_id}...")
+        self.log(f"请求导入设备 ID: {dev_id}...")
         if not self.connected:
             self.log("请先连接！", "WARN")
             return
             
-        self.log("导入功能开发中...")
+        # 发送 CMD_IMPORT_DEVICE
+        # Payload: dev_id(2) + reserved(2)
+        payload = struct.pack('!HH', dev_id, 0)
+        self.send_cmd(CMD_IMPORT_DEVICE, dev_id=dev_id, payload=payload)
+        self.log("已发送导入请求，等待服务器响应...")
         
     def handle_device_update(self, payload):
         """处理设备更新通知"""
@@ -285,6 +292,39 @@ class USBRelayClient:
                 self.log(f"[SERVER-{level_name}] {message}")
         except Exception as e:
             self.log(f"解析日志失败: {e}", "ERROR")
+    
+    def handle_import_response(self, dev_id, payload):
+        """处理设备导入响应"""
+        try:
+            if len(payload) < 8:
+                self.log("导入响应数据不完整", "ERROR")
+                return
+            
+            # 解析status (2 bytes)
+            status = int.from_bytes(payload[:2], 'big')
+            
+            # 解析dev_id (2 bytes)
+            resp_dev_id = int.from_bytes(payload[2:4], 'big')
+            
+            # 解析result_code (4 bytes)
+            result_code = int.from_bytes(payload[4:8], 'big')
+            
+            # 解析message (如果有)
+            message = ""
+            if len(payload) > 8:
+                message = payload[8:].decode('utf-8', errors='ignore')
+            
+            if status == 0:
+                self.log(f"✅ 设备导入成功 (ID: {resp_dev_id})")
+                if message:
+                    self.log(f"   {message}")
+                self.log(f"⚠️  注意：完整的USB虚拟化需要驱动集成，当前为占位符实现")
+            else:
+                self.log(f"❌ 设备导入失败 (ID: {resp_dev_id}, Code: {result_code})")
+                if message:
+                    self.log(f"   错误: {message}")
+        except Exception as e:
+            self.log(f"解析导入响应失败: {e}", "ERROR")
         
     def receive_loop(self):
         """接收消息循环 - 使用正确的协议解析"""
@@ -306,7 +346,7 @@ class USBRelayClient:
                     if len(buffer) < 16:
                         break
                     
-                    cmd, seq, dev_id, length, _reserved = struct.unpack('!HIHHI', buffer[:16])
+                    cmd, seq, dev_id, length, _reserved = struct.unpack('!HIHII', buffer[:16])
                     
                     # 检查是否有完整的payload
                     if len(buffer) < 16 + length:
@@ -317,13 +357,15 @@ class USBRelayClient:
                     buffer = buffer[16+length:]
                     
                     # 根据命令码处理
-                    if cmd == 0x1002:  # CMD_DEVICE_UPDATE
+                    if cmd == CMD_DEVICE_UPDATE:  # 0x1002
                         self.handle_device_update(payload)
-                    elif cmd == 0x1001:  # CMD_LOG
+                    elif cmd == CMD_LOG:  # 0x1001
                         self.handle_log_message(payload)
-                    elif cmd == 0x000B:  # CMD_PONG
+                    elif cmd == CMD_PONG:  # 0x000B
                         self.log("Pong received")
-                    elif cmd == 0x0002:  # CMD_DEVLIST_RES
+                    elif cmd == CMD_IMPORT_RES:  # 0x0004
+                        self.handle_import_response(dev_id, payload)
+                    elif cmd == CMD_DEVLIST_RES:  # 0x0002
                         self.log(f"收到设备列表响应")
                         self.update_devices_from_json(payload.decode('utf-8', errors='ignore'))
                     else:
