@@ -198,6 +198,11 @@ fun MainScreen(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Text(
+                            text = "Version: ${BuildConfig.VERSION_NAME}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         if (!serviceBound) {
                             Text(
                                 text = "Service not bound",
