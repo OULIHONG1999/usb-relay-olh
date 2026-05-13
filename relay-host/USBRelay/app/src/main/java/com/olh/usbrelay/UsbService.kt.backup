@@ -19,11 +19,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 class UsbService : Service() {
@@ -32,13 +37,6 @@ class UsbService : Service() {
         private const val TAG = "UsbService"
         private const val CHANNEL_ID = "usb_relay_service_channel"
         private const val NOTIFICATION_ID = 1001
-        
-        // Protocol command codes
-        private const val CMD_DEVLIST_REQ = 0x0001
-        private const val CMD_KEEPALIVE = 0x000A
-        private const val CMD_PONG = 0x000B
-        private const val CMD_LOG = 0x1001
-        private const val CMD_DEVICE_UPDATE = 0x1002
     }
 
     private val binder = UsbBinder()
@@ -111,7 +109,7 @@ class UsbService : Service() {
     fun broadcastDeviceUpdate() {
         clients.forEach { client ->
             try {
-                client.sendDeviceListUpdate()
+                client.sendDeviceList()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send device update", e)
             }
@@ -216,11 +214,22 @@ class UsbService : Service() {
         return false
     }
 
+    private fun writeU16BE(output: OutputStream, value: Int) {
+        output.write((value shr 8) and 0xFF)
+        output.write(value and 0xFF)
+    }
+
+    private fun writeU32BE(output: OutputStream, value: Long) {
+        output.write(((value shr 24) and 0xFF).toInt())
+        output.write(((value shr 16) and 0xFF).toInt())
+        output.write(((value shr 8) and 0xFF).toInt())
+        output.write((value and 0xFF).toInt())
+    }
+
     private inner class ClientHandler(private val socket: Socket) {
         private var running = false
         private var clientJob: Job? = null
         private var output: OutputStream? = null
-        private var seqNum: Int = 0
 
         suspend fun run() {
             running = true
@@ -230,68 +239,18 @@ class UsbService : Service() {
                 val input = socket.getInputStream()
                 output = socket.getOutputStream()
 
-                // Send initial device list using protocol
-                sendDeviceListUpdate()
+                // 连接上就直接发送简单的JSON数据，不用复杂的协议
+                sendSimpleMessage("Hello from server!")
+                sendDeviceList()
 
-                // Read and process commands from client
+                // 简单循环，只读取数据，不处理
                 clientJob = serviceScope.launch {
-                    val headerBuffer = ByteArray(16)
+                    val buffer = ByteArray(4096)
                     while (running) {
                         try {
-                            // Read header (16 bytes)
-                            var bytesRead = 0
-                            while (bytesRead < 16 && running) {
-                                val n = input.read(headerBuffer, bytesRead, 16 - bytesRead)
-                                if (n < 0) {
-                                    running = false
-                                    break
-                                }
-                                bytesRead += n
-                            }
-                            
-                            if (!running || bytesRead < 16) break
-                            
-                            // Parse header (big-endian)
-                            val command = ((headerBuffer[0].toInt() and 0xFF) shl 8) or 
-                                         (headerBuffer[1].toInt() and 0xFF)
-                            val seq = ((headerBuffer[2].toInt() and 0xFF) shl 24) or
-                                     ((headerBuffer[3].toInt() and 0xFF) shl 16) or
-                                     ((headerBuffer[4].toInt() and 0xFF) shl 8) or
-                                     (headerBuffer[5].toInt() and 0xFF)
-                            val devId = ((headerBuffer[6].toInt() and 0xFF) shl 8) or 
-                                       (headerBuffer[7].toInt() and 0xFF)
-                            val length = ((headerBuffer[8].toInt() and 0xFF) shl 24) or
-                                        ((headerBuffer[9].toInt() and 0xFF) shl 16) or
-                                        ((headerBuffer[10].toInt() and 0xFF) shl 8) or
-                                        (headerBuffer[11].toInt() and 0xFF)
-                            
-                            log("Received cmd=0x${command.toString(16).uppercase()}, seq=$seq, len=$length")
-                            
-                            // Handle commands
-                            when (command) {
-                                CMD_DEVLIST_REQ -> {
-                                    log("Client requested device list")
-                                    sendDeviceListUpdate()
-                                }
-                                CMD_KEEPALIVE -> {
-                                    log("Ping received")
-                                    sendPong()
-                                }
-                                else -> {
-                                    log("Unknown command: 0x${command.toString(16).uppercase()}")
-                                }
-                            }
-                            
-                            // Skip payload if any
-                            if (length > 0) {
-                                val skipBuf = ByteArray(length.toInt())
-                                var skipped = 0
-                                while (skipped < length && running) {
-                                    val n = input.read(skipBuf, skipped, (length - skipped).toInt())
-                                    if (n < 0) break
-                                    skipped += n
-                                }
-                            }
+                            val bytesRead = input.read(buffer)
+                            if (bytesRead < 0) break
+                            log("Received $bytesRead bytes from client")
                         } catch (e: Exception) {
                             if (running) {
                                 log("Client read error: ${e.message}", Log.ERROR)
@@ -313,102 +272,79 @@ class UsbService : Service() {
 
             log("Client disconnected")
         }
-        
-        private fun writeU16BE(output: OutputStream, value: Int) {
-            output.write((value shr 8) and 0xFF)
-            output.write(value and 0xFF)
-        }
-        
-        private fun writeU32BE(output: OutputStream, value: Long) {
-            output.write(((value shr 24) and 0xFF).toInt())
-            output.write(((value shr 16) and 0xFF).toInt())
-            output.write(((value shr 8) and 0xFF).toInt())
-            output.write((value and 0xFF).toInt())
-        }
-        
-        private fun sendProtocolMessage(command: Int, devId: Int = 0xFFFF, payload: ByteArray = byteArrayOf()) {
+
+        private fun sendSimpleMessage(text: String) {
             try {
-                val out = output ?: return
-                val currentSeq = seqNum++
-                
-                // Write header
-                writeU16BE(out, command)
-                writeU32BE(out, currentSeq.toLong())
-                writeU16BE(out, devId)
-                writeU32BE(out, payload.size.toLong())
-                writeU32BE(out, 0) // reserved
-                
-                // Write payload
-                if (payload.isNotEmpty()) {
-                    out.write(payload)
-                }
-                out.flush()
+                val output = output ?: return
+                val msgBytes = text.toByteArray(Charsets.UTF_8)
+                output.write(msgBytes)
+                output.flush()
+                log("Sent message: $text")
             } catch (e: Exception) {
-                log("Failed to send protocol message: ${e.message}", Log.ERROR)
+                log("Failed to send simple message: ${e.message}", Log.ERROR)
             }
         }
-        
-        private fun sendPong() {
-            sendProtocolMessage(CMD_PONG)
-        }
-        
-        fun sendLog(level: Int, message: String) {
+
+        private fun sendSimpleDeviceList() {
             try {
-                val timestamp = System.currentTimeMillis()
+                val output = output ?: return
+                val json = """
+                    [
+                        {
+                            "id": 1,
+                            "vid": "0x1234",
+                            "pid": "0x5678",
+                            "class": "0x00",
+                            "name": "Test USB Device"
+                        }
+                    ]
+                """.trimIndent()
+                
+                val jsonBytes = json.toByteArray(Charsets.UTF_8)
+                output.write(jsonBytes)
+                output.flush()
+                log("Sent simple device list")
+            } catch (e: Exception) {
+                log("Failed to send device list: ${e.message}", Log.ERROR)
+            }
+        }
+
+        fun sendLog(level: Int, message: String) {
+            val output = output ?: return
+            try {
                 val msgBytes = message.toByteArray(Charsets.UTF_8)
-                
-                // Build payload: timestamp(8) + level(1) + msg_len(4) + message
-                val payload = ByteArray(8 + 1 + 4 + msgBytes.size)
-                var offset = 0
-                
-                // Timestamp (8 bytes, big-endian)
-                for (i in 7 downTo 0) {
-                    payload[offset++] = ((timestamp shr (i * 8)) and 0xFF).toByte()
-                }
-                
-                // Level (1 byte)
-                payload[offset++] = level.toByte()
-                
-                // Message length (4 bytes, big-endian)
-                val msgLen = msgBytes.size
-                payload[offset++] = ((msgLen shr 24) and 0xFF).toByte()
-                payload[offset++] = ((msgLen shr 16) and 0xFF).toByte()
-                payload[offset++] = ((msgLen shr 8) and 0xFF).toByte()
-                payload[offset++] = (msgLen and 0xFF).toByte()
-                
-                // Message
-                System.arraycopy(msgBytes, 0, payload, offset, msgBytes.size)
-                
-                sendProtocolMessage(CMD_LOG, 0xFFFF, payload)
+                output.write(msgBytes)
+                output.flush()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to send log", e)
             }
         }
-        
-        fun sendDeviceListUpdate() {
+
+        fun sendDeviceList() {
             try {
-                // Create JSON device list
+                val output = output ?: return
+                
+                // Create a JSON array of available devices
                 val devicesJson = StringBuilder("[")
                 var first = true
-                var id = 1
                 for ((deviceName, device) in availableDevices) {
                     if (!first) devicesJson.append(",")
                     first = false
                     
                     devicesJson.append("{")
-                    devicesJson.append("\"id\":$id,")
+                    devicesJson.append("\"id\":${availableDevices.keys.indexOf(deviceName) + 1},")
                     devicesJson.append("\"vid\":\"0x${String.format("%04x", device.vendorId)}\",")
                     devicesJson.append("\"pid\":\"0x${String.format("%04x", device.productId)}\",")
                     devicesJson.append("\"class\":\"0x${String.format("%02x", device.deviceClass)}\",")
                     devicesJson.append("\"name\":\"${device.productName ?: "Unknown Device"}\"")
                     devicesJson.append("}")
-                    id++
                 }
                 devicesJson.append("]")
                 
                 val jsonBytes = devicesJson.toString().toByteArray(Charsets.UTF_8)
-                sendProtocolMessage(CMD_DEVICE_UPDATE, 0xFFFF, jsonBytes)
-                log("Sent device list update with ${availableDevices.size} devices")
+                output.write(jsonBytes)
+                output.flush()
+                log("Sent updated device list with ${availableDevices.size} devices")
             } catch (e: Exception) {
                 log("Failed to send device list: ${e.message}", Log.ERROR)
             }
