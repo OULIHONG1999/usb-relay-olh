@@ -10,7 +10,12 @@
 #include <stdint.h>
 
 #ifdef _WIN32
+/* Windows: winsock2.h must be included before windows.h */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
@@ -35,6 +40,8 @@
 #define CMD_DISCONNECT          0x0009
 #define CMD_KEEPALIVE           0x000A
 #define CMD_LOG                 0x1001
+#define CMD_DEVICE_UPDATE       0x1002  /* Server pushes device list update */
+#define CMD_IMPORT_DEVICE       0x1003  /* Client requests to import specific device */
 
 /* USB transfer types */
 #define USBIP_OLH_TRANSFER_ISO  0
@@ -105,6 +112,29 @@ PACKED_STRUCT(usbip_olh_interface_info) {
 };
 
 /* --- Device Info (in DEVLIST_RES) --- */
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+typedef struct usbip_olh_device_info {
+    uint16_t dev_id;
+    uint16_t busnum;
+    uint16_t devnum;
+    uint16_t speed;             /* USBIP_OLH_SPEED_xxx */
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t bcdDevice;
+    uint8_t  device_class;
+    uint8_t  device_subclass;
+    uint8_t  device_protocol;
+    uint8_t  config_count;
+    uint8_t  interface_count;
+    uint16_t path_len;
+    /* Followed by: char path[path_len] */
+    /* Followed by: uint16_t desc_len */
+    /* Followed by: uint8_t device_descriptor[desc_len] */
+    /* Followed by: usbip_olh_interface_info interfaces[] */
+} usbip_olh_device_info_t;
+#pragma pack(pop)
+#else
 PACKED_STRUCT(usbip_olh_device_info) {
     uint16_t dev_id;
     uint16_t busnum;
@@ -124,6 +154,7 @@ PACKED_STRUCT(usbip_olh_device_info) {
     /* Followed by: uint8_t device_descriptor[desc_len] */
     /* Followed by: usbip_olh_interface_info interfaces[] */
 };
+#endif
 
 /* --- URB Submit (0x0005) --- */
 PACKED_STRUCT(usbip_olh_urb_submit) {

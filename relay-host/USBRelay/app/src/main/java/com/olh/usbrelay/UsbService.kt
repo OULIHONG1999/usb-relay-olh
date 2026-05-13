@@ -1,4 +1,3 @@
-
 package com.olh.usbrelay
 
 import android.app.Notification
@@ -57,6 +56,9 @@ class UsbService : Service() {
     
     private lateinit var usbManager: UsbManager
     private lateinit var permissionManager: UsbPermissionManager
+    
+    // Track available USB devices
+    private var availableDevices = mutableMapOf<String, UsbDevice>()
 
     inner class UsbBinder : Binder() {
         fun getService(): UsbService = this@UsbService
@@ -182,17 +184,32 @@ class UsbService : Service() {
 
     fun bindDevice(usbManager: UsbManager, device: UsbDevice): DeviceBindResult {
         log("Bind device: ${device.deviceName}")
+        
+        // Add to available devices
+        availableDevices[device.deviceName] = device
+        
+        // Broadcast device update to all clients
         broadcastDeviceUpdate()
-        return DeviceBindResult.Success("device-1")
+        
+        return DeviceBindResult.Success("device-${availableDevices.size}")
     }
 
     fun unbindDevice(deviceName: String): DeviceUnbindResult {
         log("Unbind device: $deviceName")
+        
+        // Remove from available devices
+        availableDevices.remove(deviceName)
+        
+        // Broadcast device update to all clients
         broadcastDeviceUpdate()
+        
         return DeviceUnbindResult.Success
     }
 
     fun handleDeviceDetached(deviceName: String): Boolean {
+        // Remove from available devices when detached
+        availableDevices.remove(deviceName)
+        
         broadcastDeviceUpdate()
         return false
     }
@@ -224,7 +241,7 @@ class UsbService : Service() {
 
                 // 连接上就直接发送简单的JSON数据，不用复杂的协议
                 sendSimpleMessage("Hello from server!")
-                sendSimpleDeviceList()
+                sendDeviceList()
 
                 // 简单循环，只读取数据，不处理
                 clientJob = serviceScope.launch {
@@ -304,7 +321,33 @@ class UsbService : Service() {
         }
 
         fun sendDeviceList() {
-            sendSimpleDeviceList()
+            try {
+                val output = output ?: return
+                
+                // Create a JSON array of available devices
+                val devicesJson = StringBuilder("[")
+                var first = true
+                for ((deviceName, device) in availableDevices) {
+                    if (!first) devicesJson.append(",")
+                    first = false
+                    
+                    devicesJson.append("{")
+                    devicesJson.append("\"id\":${availableDevices.keys.indexOf(deviceName) + 1},")
+                    devicesJson.append("\"vid\":\"0x${String.format("%04x", device.vendorId)}\",")
+                    devicesJson.append("\"pid\":\"0x${String.format("%04x", device.productId)}\",")
+                    devicesJson.append("\"class\":\"0x${String.format("%02x", device.deviceClass)}\",")
+                    devicesJson.append("\"name\":\"${device.productName ?: "Unknown Device"}\"")
+                    devicesJson.append("}")
+                }
+                devicesJson.append("]")
+                
+                val jsonBytes = devicesJson.toString().toByteArray(Charsets.UTF_8)
+                output.write(jsonBytes)
+                output.flush()
+                log("Sent updated device list with ${availableDevices.size} devices")
+            } catch (e: Exception) {
+                log("Failed to send device list: ${e.message}", Log.ERROR)
+            }
         }
 
         fun close() {
