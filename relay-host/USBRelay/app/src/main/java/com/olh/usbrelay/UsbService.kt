@@ -38,6 +38,11 @@ class UsbService : Service() {
         private const val CMD_DEVLIST_RES = 0x0002
         private const val CMD_IMPORT_REQ = 0x0003
         private const val CMD_IMPORT_RES = 0x0004
+        private const val CMD_URB_SUBMIT = 0x0005
+        private const val CMD_URB_COMPLETE = 0x0006
+        private const val CMD_URB_UNLINK = 0x0007
+        private const val CMD_URB_UNLINK_RET = 0x0008
+        private const val CMD_DISCONNECT = 0x0009
         private const val CMD_KEEPALIVE = 0x000A
         private const val CMD_PONG = 0x000B
         private const val CMD_LOG = 0x1001
@@ -231,6 +236,9 @@ class UsbService : Service() {
         private var clientJob: Job? = null
         private var output: OutputStream? = null
         private var seqNum: Int = 0
+        
+        // URB handlers for imported devices
+        private val urbHandlers = mutableMapOf<Int, UrbHandler>()
 
         suspend fun run() {
             running = true
@@ -290,6 +298,14 @@ class UsbService : Service() {
                                 CMD_IMPORT_DEVICE -> {
                                     log("Import device request: dev_id=$devId")
                                     handleImportDevice(devId, input, length.toLong())
+                                }
+                                CMD_URB_SUBMIT -> {
+                                    log("URB submit received: dev_id=$devId, len=$length")
+                                    handleUrbSubmit(devId, input, length)
+                                }
+                                CMD_URB_UNLINK -> {
+                                    log("URB unlink received: dev_id=$devId")
+                                    handleUrbUnlink(devId, input, length)
                                 }
                                 else -> {
                                     log("Unknown command: 0x${command.toString(16).uppercase()}")
@@ -472,6 +488,16 @@ class UsbService : Service() {
                 
                 // Import device (placeholder - real implementation needs usbip-win2 driver)
                 importedDevices[devId] = device
+                
+                // Create URB handler for this device
+                val urbHandler = UrbHandler(usbManager, device)
+                if (urbHandler.open()) {
+                    urbHandlers[devId] = urbHandler
+                    log("URB handler created for device: $deviceName")
+                } else {
+                    log("Failed to create URB handler for: $deviceName", Log.WARN)
+                }
+                
                 log("Device imported successfully: $deviceName (ID: $devId)")
                 sendImportResponse(0, devId, 0, "Success - Note: Full USB virtualization requires driver integration")
                 
@@ -511,10 +537,75 @@ class UsbService : Service() {
                 log("Failed to send import response: ${e.message}", Log.ERROR)
             }
         }
+        
+        private fun handleUrbSubmit(devId: Int, input: java.io.InputStream, payloadLength: Int) {
+            try {
+                // Read URB submit payload
+                val urbPayload = ByteArray(payloadLength)
+                var bytesRead = 0
+                while (bytesRead < payloadLength) {
+                    val n = input.read(urbPayload, bytesRead, payloadLength - bytesRead)
+                    if (n < 0) break
+                    bytesRead += n
+                }
+                
+                // Parse URB submit
+                val urbSubmit = UrbSubmit.parse(urbPayload)
+                
+                // Find URB handler
+                val urbHandler = urbHandlers[devId]
+                if (urbHandler == null) {
+                    log("URB handler not found for dev_id=$devId", Log.WARN)
+                    val urbComplete = UrbComplete(urbSubmit.seqNum, URB_STATUS_NO_DEVICE, byteArrayOf())
+                    sendProtocolMessage(CMD_URB_COMPLETE, devId.toShort().toInt() and 0xFFFF, urbComplete.toByteArray())
+                    return
+                }
+                
+                // Execute URB
+                val urbComplete = urbHandler.handleUrbSubmit(urbSubmit)
+                
+                // Send response
+                sendProtocolMessage(CMD_URB_COMPLETE, devId.toShort().toInt() and 0xFFFF, urbComplete.toByteArray())
+                
+            } catch (e: Exception) {
+                log("URB submit error: ${e.message}", Log.ERROR)
+                e.printStackTrace()
+            }
+        }
+        
+        private fun handleUrbUnlink(devId: Int, input: java.io.InputStream, payloadLength: Int) {
+            try {
+                // Read unlink payload
+                val unlinkPayload = ByteArray(payloadLength)
+                var bytesRead = 0
+                while (bytesRead < payloadLength) {
+                    val n = input.read(unlinkPayload, bytesRead, payloadLength - bytesRead)
+                    if (n < 0) break
+                    bytesRead += n
+                }
+                
+                // Parse unlink request
+                val urbUnlink = UrbUnlink.parse(unlinkPayload)
+                
+                // For now, just acknowledge the unlink
+                val unlinkRet = UrbUnlinkRet(urbUnlink.seqNum, 0)
+                sendProtocolMessage(CMD_URB_UNLINK_RET, devId.toShort().toInt() and 0xFFFF, unlinkRet.toByteArray())
+                
+                log("URB unlinked: seq=${urbUnlink.seqNum}")
+                
+            } catch (e: Exception) {
+                log("URB unlink error: ${e.message}", Log.ERROR)
+            }
+        }
 
         fun close() {
             running = false
             clientJob?.cancel()
+            
+            // Close all URB handlers
+            urbHandlers.values.forEach { it.close() }
+            urbHandlers.clear()
+            
             try {
                 socket.close()
             } catch (e: IOException) {

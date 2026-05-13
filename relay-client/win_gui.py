@@ -19,6 +19,11 @@ CMD_DEVLIST_REQ = 0x0001
 CMD_DEVLIST_RES = 0x0002
 CMD_IMPORT_REQ = 0x0003
 CMD_IMPORT_RES = 0x0004
+CMD_URB_SUBMIT = 0x0005
+CMD_URB_COMPLETE = 0x0006
+CMD_URB_UNLINK = 0x0007
+CMD_URB_UNLINK_RET = 0x0008
+CMD_DISCONNECT = 0x0009
 CMD_KEEPALIVE = 0x000A
 CMD_PONG = 0x000B
 CMD_LOG = 0x1001
@@ -324,6 +329,44 @@ class USBRelayClient:
                 if message:
                     self.log(f"   错误: {message}")
         except Exception as e:
+            self.log(f"处理导入响应错误: {str(e)}", "ERROR")
+    
+    def handle_urb_complete(self, dev_id, payload):
+        """处理URB完成响应"""
+        try:
+            if len(payload) < 12:
+                self.log("URB完成响应数据不完整", "ERROR")
+                return
+            
+            # 解析seq_num (4 bytes)
+            seq_num = int.from_bytes(payload[:4], 'big')
+            
+            # 解析status (4 bytes)
+            status = int.from_bytes(payload[4:8], 'big')
+            # Convert to signed
+            if status & 0x80000000:
+                status = status - 0x100000000
+            
+            # 解析data_len (4 bytes)
+            data_len = int.from_bytes(payload[8:12], 'big')
+            
+            # 提取数据
+            data = payload[12:12+data_len] if data_len > 0 else b''
+            
+            status_map = {
+                0: "OK",
+                -1: "NO_DEVICE",
+                -2: "STALL",
+                -3: "ERROR",
+                -4: "TIMEOUT"
+            }
+            status_str = status_map.get(status, f"UNKNOWN({status})")
+            
+            self.log(f"📦 URB Complete: seq={seq_num}, status={status_str}, data_len={data_len}")
+            
+        except Exception as e:
+            self.log(f"处理URB完成响应错误: {str(e)}", "ERROR")
+        except Exception as e:
             self.log(f"解析导入响应失败: {e}", "ERROR")
         
     def receive_loop(self):
@@ -365,6 +408,8 @@ class USBRelayClient:
                         self.log("Pong received")
                     elif cmd == CMD_IMPORT_RES:  # 0x0004
                         self.handle_import_response(dev_id, payload)
+                    elif cmd == CMD_URB_COMPLETE:  # 0x0006
+                        self.handle_urb_complete(dev_id, payload)
                     elif cmd == CMD_DEVLIST_RES:  # 0x0002
                         self.log(f"收到设备列表响应")
                         self.update_devices_from_json(payload.decode('utf-8', errors='ignore'))
