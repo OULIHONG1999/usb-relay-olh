@@ -49,6 +49,13 @@
 #define USBIP_OLH_TRANSFER_CTRL 2
 #define USBIP_OLH_TRANSFER_BULK 3
 
+/* URB Status codes */
+#define USBIP_OLH_URB_STATUS_OK         0
+#define USBIP_OLH_URB_STATUS_NO_DEVICE  -1
+#define USBIP_OLH_URB_STATUS_STALL      -2
+#define USBIP_OLH_URB_STATUS_ERROR      -3
+#define USBIP_OLH_URB_STATUS_TIMEOUT    -4
+
 /* USB direction */
 #define USBIP_OLH_DIR_OUT       0
 #define USBIP_OLH_DIR_IN        1
@@ -282,5 +289,42 @@ int usbip_olh_send_urb_submit(void *conn, uint32_t seq_num, uint16_t dev_id,
  * Receive URB complete.
  */
 int usbip_olh_recv_urb_complete(void *conn, int32_t *status, void **response_data, uint32_t *response_len);
+
+/* ============================================================
+ * URB Structures (for USB transfer)
+ * ============================================================ */
+
+/* --- URB Submit (CMD_URB_SUBMIT payload) --- */
+PACKED_STRUCT(usbip_olh_urb_submit) {
+    uint32_t seq_num;           /* Sequence number */
+    uint16_t dev_id;            /* Device ID */
+    uint8_t  transfer_type;     /* USBIP_OLH_TRANSFER_xxx */
+    uint8_t  endpoint;          /* Endpoint number (0-15) */
+    uint8_t  direction;         /* USBIP_OLH_DIR_xxx */
+    uint8_t  reserved1;
+    uint32_t data_len;          /* Transfer data length */
+    uint32_t interval;          /* For ISO/INT transfers */
+    uint8_t  setup_packet[8];   /* For CTRL transfers only */
+};
+
+/* --- URB Complete (CMD_URB_COMPLETE payload header) --- */
+PACKED_STRUCT(usbip_olh_urb_complete) {
+    uint32_t seq_num;           /* Matching submit seq_num */
+    int32_t  status;            /* USBIP_OLH_URB_STATUS_xxx */
+    uint32_t data_len;          /* Actual data length */
+};
+
+/* --- URB Unlink (CMD_URB_UNLINK payload) --- */
+PACKED_STRUCT(usbip_olh_urb_unlink) {
+    uint32_t seq_num;           /* Seq num of URB to unlink */
+    uint16_t dev_id;            /* Device ID */
+    uint16_t reserved;
+};
+
+/* --- URB Unlink Return (CMD_URB_UNLINK_RET payload) --- */
+PACKED_STRUCT(usbip_olh_urb_unlink_ret) {
+    uint32_t seq_num;           /* Matching unlink seq_num */
+    int32_t  status;            /* Status of unlink operation */
+};
 
 #endif /* USBIP_OLH_PROTOCOL_H */
